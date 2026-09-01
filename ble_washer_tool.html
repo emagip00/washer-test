@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BLE Washer Test Tool v2</title>
+<style>
+  :root{--bg:#0f1220;--card:#191d2e;--line:#2a2f45;--tx:#e7e9f2;--mut:#9aa0bd;
+    --acc:#7c5cff;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--gold:#eab308;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    background:var(--bg);color:var(--tx);padding:16px;max-width:640px;margin:0 auto}
+  h1{font-size:18px;margin:0 0 4px}
+  .sub{color:var(--mut);font-size:12px;margin-bottom:16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+  .card h2{font-size:13px;margin:0 0 10px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
+  label{display:block;font-size:12px;color:var(--mut);margin:8px 0 4px}
+  input{width:100%;background:#11142270;border:1px solid var(--line);color:var(--tx);
+    border-radius:8px;padding:9px 10px;font-size:14px;font-family:inherit}
+  .row{display:flex;gap:8px}.row>div{flex:1}
+  button{width:100%;background:var(--acc);color:#fff;border:0;border-radius:9px;
+    padding:12px;font-size:14px;font-weight:600;cursor:pointer;margin-top:10px}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.sec{background:#262b40}
+  button.gold{background:var(--gold);color:#1a1500}
+  button.sm{padding:9px;font-size:12px;margin-top:6px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  .status{display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--err)}
+  .dot.on{background:var(--ok)}.dot.wait{background:var(--warn)}
+  #log{background:#0a0c17;border:1px solid var(--line);border-radius:8px;padding:10px;
+    height:250px;overflow-y:auto;font-family:ui-monospace,Menlo,Consolas,monospace;
+    font-size:11.5px;line-height:1.55;white-space:pre-wrap;word-break:break-all}
+  .l-tx{color:#60a5fa}.l-rx{color:#34d399}.l-ok{color:#22c55e}.l-err{color:#f87171}
+  .l-i{color:var(--mut)}.l-step{color:var(--gold)}
+  .hint{font-size:11px;color:var(--mut);margin-top:6px}
+</style>
+</head>
+<body>
+  <h1>🧺 BLE Washer Test Tool <span style="color:var(--acc)">v2</span></h1>
+  <div class="sub">BlueMeterLib 카드결제 상태머신 · 인가된 테스트 기기 전용</div>
+
+  <div class="status"><span class="dot" id="dot"></span><span id="stateTx">연결 안 됨</span></div>
+
+  <div class="card">
+    <h2>1 · 연결</h2>
+    <label>기기 이름 필터 (접두어)</label>
+    <input id="namePrefix" value="CW">
+    <button id="btnConnect">스캔 &amp; 연결</button>
+    <button id="btnDisconnect" class="sec" disabled>연결 해제</button>
+    <button id="btnHandshake" class="sec" disabled>핸드셰이크 (CMD 14)</button>
+    <div class="hint">먼저 세탁기 전원버튼을 눌러 "삐삐"(결제대기)로 만든 뒤 진행하세요.</div>
+  </div>
+
+  <div class="card">
+    <h2>2 · 카드 결제 시퀀스 (작동)</h2>
+    <div class="row">
+      <div><label>결제 금액 (원)</label><input id="amount" type="number" value="2000"></div>
+      <div><label>카드 잔액 (remaining)</label><input id="remain" type="number" value="10000"></div>
+    </div>
+    <button id="btnFull" class="gold" disabled>▶ 전체 결제 플로우 실행 (삽입→확인→결제→제거)</button>
+    <div class="grid">
+      <button id="btnInsert" class="sec sm" disabled>카드삽입(1)</button>
+      <button id="btnCheck"  class="sec sm" disabled>금액확인(3)</button>
+      <button id="btnPay"    class="sec sm" disabled>결제(4)</button>
+      <button id="btnRemove" class="sec sm" disabled>카드제거(5)</button>
+    </div>
+    <div class="hint">각 단계는 세탁기와 자동으로 왕복(A160→…→A161)합니다. 로그에서 진행을 볼 수 있어요.</div>
+  </div>
+
+  <div class="card">
+    <h2>3 · 수동 / 디버그</h2>
+    <label>단일 카드상태 A(state) 전송</label>
+    <div class="row">
+      <div><input id="astate" type="number" value="160"></div>
+      <div><button id="btnA" class="sec sm" style="margin-top:0" disabled>A(state) 전송</button></div>
+    </div>
+    <label style="margin-top:10px">커스텀 패킷 (hex)</label>
+    <input id="raw" placeholder="예: 24 01 E0 06 D2 23">
+    <button id="btnRaw" class="sec sm" disabled>커스텀 전송</button>
+  </div>
+
+  <div class="card">
+    <h2>4 · 로그</h2>
+    <div id="log"></div>
+    <button id="btnClear" class="sec">로그 지우기</button>
+  </div>
+
+<script>
+const SVC_UUID="0000ffb0-0000-1000-8000-00805f9b34fb";
+const CHAR_UUID="0000ffb2-0000-1000-8000-00805f9b34fb";
+
+let device=null,gatt=null,ch=null,SEQ=0;
+const $=id=>document.getElementById(id);
+const dot=$('dot'),stateTx=$('stateTx'),logEl=$('log');
+
+function log(m,c='l-i'){const t=new Date().toLocaleTimeString('ko-KR',{hour12:false});
+  logEl.innerHTML+=`<span class="${c}">[${t}] ${m}</span>\n`;logEl.scrollTop=logEl.scrollHeight;}
+function hex(b){return[...b].map(x=>x.toString(16).padStart(2,'0').toUpperCase()).join(' ');}
+function setState(t,m){stateTx.textContent=t;dot.className='dot'+(m?' '+m:'');}
+function setBusy(on){$('btnConnect').disabled=on;
+  ['btnDisconnect','btnHandshake','btnFull','btnInsert','btnCheck','btnPay','btnRemove','btnA','btnRaw']
+   .forEach(id=>$(id).disabled=!on);}
+
+// ===== 카드 상태머신 =====
+let cardCommand=0, cardState=0, amountMoney=0, remainedMoney=0;
+let cardMsg=[0,0,0,0], cardKind=0, cardActive=false, stepTimer=null, flowQueue=[];
+
+// CMD 7 카드 패킷 빌더 (BlueMeterLib.A() 그대로)
+function buildCard(state){
+  const i12=state<208?0:1;
+  let i8,i10;
+  if(state==160||state==161||state==163){i8=0;i10=7;}else{i8=3;i10=18;}
+  const len=i10+6;
+  const b=new Uint8Array(len);
+  b[4]=i10;b[5]=i12;b[6]=state;b[7]=i8;b[8]=0;b[9]=0;
+  if(i8==3){
+    const d=new Date();
+    const year=d.getFullYear()-2000,month=d.getMonth()+1,day=d.getDate();
+    const hour=d.getHours(),min=d.getMinutes(),sec=d.getSeconds()+1;
+    b[10]=3;b[11]=cardMsg[0];b[12]=cardMsg[1];b[13]=cardMsg[2];b[14]=cardMsg[3];
+    b[15]=((day&31)<<3)|((month>>1)&7);
+    b[16]=((month&1)<<7)|(year&127);
+    b[17]=(hour>>2)&7;
+    b[18]=((hour&3)<<6)|(min&63);
+    b[19]=state==210?cardKind:0;
+    b[20]=0;
+    let s=0;for(let k=0;k<=i10-2;k++)s+=b[4+k];
+    b[i10+3]=(s&0xFF)^0x55;
+    b[17]=(b[17]|(((sec>>1)&31)<<3))&0xFF;
+  }else{
+    let s=0;for(let k=0;k<=i10-2;k++)s+=b[4+k];
+    b[i10+3]=(s&0xFF)^0x55;
+  }
+  // 외부 프레임 P(7,len)
+  SEQ=(SEQ+1)&0xFF;
+  b[0]=0x24;b[1]=SEQ;b[2]=((7&15)<<4)|((len>>8)&15);b[3]=len&0xFF;b[len-1]=0x23;
+  let os=35;for(let k=0;k<len-2;k++)os+=b[k];os&=0xFF;if(os)os=256-os;b[len-2]=os;
+  cardState=state;
+  return b;
+}
+
+async function sendCard(state){
+  const p=buildCard(state);
+  log('  → A('+state+')  '+hex(p),'l-tx');
+  await writeBytes(p,true);
+  armTimeout();
+}
+function armTimeout(){
+  clearTimeout(stepTimer);
+  stepTimer=setTimeout(()=>{ if(cardActive) log('⏱ 응답 없음 (타임아웃). 세탁기 상태/전원버튼 확인','l-err'); },3000);
+}
+
+// 카드 응답 파싱 → 상태머신 진행 (Q() 재현)
+function onCardResponse(frame){
+  clearTimeout(stepTimer);
+  let i=frame.indexOf(0x24); if(i<0)i=0;
+  const b2=frame[i+2], cmd=(b2>>4)&15, res=b2&15, len=frame[i+3];
+  if(cmd!==7){ return false; } // 카드응답 아님
+  if(res>=8){ log('✗ 세탁기 거부 (RES='+res+')','l-err'); cardActive=false; return true; }
+  const pkt=frame.slice(i+4, i+4+Math.max(0,len-6)); // 카드 payload
+  // D() 간이검증
+  let ok=false;
+  if(pkt.length>=3 && pkt[2]===1 && pkt.length===(pkt[0]&0xFF)){
+    let s=0;for(let k=0;k<pkt.length-1;k++)s+=pkt[k];
+    if(cardCommand===4 && pkt.length>5) s-=pkt[5];
+    ok=(((s&0xFF)^0x55)===(pkt[pkt.length-1]&0xFF));
+  }
+  log('  ← 응답 CMD7 RES'+res+' '+(ok?'✓검증OK':'⚠검증불일치')+'  ['+hex(pkt)+']', ok?'l-rx':'l-err');
+
+  advance(pkt);
+  return true;
+}
+
+function advance(pkt){
+  if(cardState===160){
+    switch(cardCommand){
+      case 1: cardMsg=[0,0,0,0]; return sendCard(164);
+      case 3: cardMsg=[0,0,0,0]; return sendCard(168);
+      case 4: cardMsg=[0,(amountMoney/100)&0xFF,0,0]; return sendCard(167);
+      case 5: cardMsg=[0,0,0,0]; return sendCard(166);
+      case 2: {
+        if(remainedMoney>9999) cardMsg=[0,99,0,99];
+        else cardMsg=[0,(remainedMoney/100)&0xFF,0,(remainedMoney%100)&0xFF];
+        return sendCard(165);
+      }
+    }
+  }
+  if(cardState!==161){
+    if(cardCommand===3){
+      const b8=pkt[15]||0;
+      let amt;
+      if((pkt[16]&0xFF)!==0) amt=0;
+      else { const b10=pkt[8]||0; amt=b10*100; if((b8&1)===0) amt=b10*-100; }
+      log('  ▷ 확인된 금액: '+amt+'원','l-step');
+    } else if(cardCommand===4){
+      log('  ▷ 남은시간: '+((pkt[5]||0)&0xFF),'l-step');
+    }
+    cardMsg=[0,0,0,0]; return sendCard(161);
+  }
+  // cardState===161 → 마무리
+  switch(cardCommand){
+    case 1: log('  ▷ 삽입 1단계 완료 → 잔액확인(2)','l-step');
+            cardCommand=2; return sendCard(160);
+    case 2: log('★ 카드삽입 성공','l-ok'); return finishStep();
+    case 3: log('★ 금액확인 성공','l-ok'); return finishStep();
+    case 4: log('★★ 결제 성공 → 세탁기 작동!','l-ok'); return finishStep();
+    case 5: log('★ 카드제거 성공','l-ok'); return finishStep();
+  }
+}
+
+function startCard(cmd){
+  cardActive=true; cardCommand=cmd; cardMsg=[0,0,0,0];
+  amountMoney=parseInt($('amount').value)||0;
+  remainedMoney=parseInt($('remain').value)||0;
+  const names={1:'카드삽입',3:'금액확인',4:'결제',5:'카드제거'};
+  log('▶ '+names[cmd]+' 시작 (CardCommand '+cmd+')','l-step');
+  sendCard(160);
+}
+function finishStep(){
+  if(flowQueue.length){ const next=flowQueue.shift(); setTimeout(()=>startCard(next),400); }
+  else cardActive=false;
+}
+
+// ===== 쓰기 =====
+async function writeBytes(bytes,quiet){
+  const noResp=ch.properties.writeWithoutResponse;
+  for(let i=0;i<bytes.length;i+=20){
+    const c=bytes.slice(i,i+20);
+    if(noResp) await ch.writeValueWithoutResponse(c); else await ch.writeValueWithResponse(c);
+  }
+  if(!quiet) log('TX → '+hex(bytes),'l-tx');
+}
+
+// ===== 연결 =====
+$('btnConnect').onclick=async()=>{
+  if(!navigator.bluetooth){log('Web Bluetooth 미지원 (안드로이드 Chrome 필요)','l-err');return;}
+  const pfx=$('namePrefix').value.trim();
+  try{
+    setState('스캔 중…','wait');log('스캔 시작…');
+    const opts=pfx?{filters:[{namePrefix:pfx}],optionalServices:[SVC_UUID]}
+                  :{acceptAllDevices:true,optionalServices:[SVC_UUID]};
+    device=await navigator.bluetooth.requestDevice(opts);
+    log('선택: '+(device.name||'(이름없음)'));
+    device.addEventListener('gattdisconnected',()=>{setState('연결 끊김','');setBusy(false);cardActive=false;log('연결 해제됨','l-err');});
+    setState('연결 중…','wait');
+    gatt=await device.gatt.connect();
+    const svc=await gatt.getPrimaryService(SVC_UUID);
+    ch=await svc.getCharacteristic(CHAR_UUID);
+    await ch.startNotifications();
+    ch.addEventListener('characteristicvaluechanged',e=>{
+      const v=new Uint8Array(e.target.value.buffer);
+      log('RX ← '+hex(v),'l-rx');
+      if(cardActive) onCardResponse(v);
+    });
+    SEQ=0; setState('연결됨: '+(device.name||''),'on'); setBusy(true);
+    log('★ 준비 완료','l-ok');
+  }catch(err){setState('연결 안 됨','');log('오류: '+err.message,'l-err');}
+};
+$('btnDisconnect').onclick=()=>{if(gatt&&gatt.connected)gatt.disconnect();};
+
+// ===== 버튼 =====
+function hs(){SEQ=(SEQ+1)&0xFF;const b=new Uint8Array(6);
+  b[0]=0x24;b[1]=SEQ;b[2]=0xE0;b[3]=6;b[5]=0x23;
+  let s=35;for(let k=0;k<4;k++)s+=b[k];s&=0xFF;if(s)s=256-s;b[4]=s;return b;}
+$('btnHandshake').onclick=async()=>{try{await writeBytes(hs());}catch(e){log('실패:'+e.message,'l-err');}};
+
+$('btnFull').onclick=()=>{ flowQueue=[3,4,5]; startCard(1); };      // 삽입→확인→결제→제거
+$('btnInsert').onclick=()=>{flowQueue=[];startCard(1);};
+$('btnCheck').onclick =()=>{flowQueue=[];startCard(3);};
+$('btnPay').onclick   =()=>{flowQueue=[];startCard(4);};
+$('btnRemove').onclick=()=>{flowQueue=[];startCard(5);};
+
+$('btnA').onclick=async()=>{const s=parseInt($('astate').value)||160;
+  cardActive=false;try{await writeBytes(buildCard(s));}catch(e){log('실패:'+e.message,'l-err');}};
+$('btnRaw').onclick=async()=>{const c=$('raw').value.replace(/[^0-9a-fA-F]/g,'');
+  if(c.length%2){log('hex 자릿수 오류','l-err');return;}
+  try{await writeBytes(new Uint8Array(c.match(/../g).map(h=>parseInt(h,16))));}catch(e){log('실패:'+e.message,'l-err');}};
+$('btnClear').onclick=()=>{logEl.innerHTML='';};
+
+log('v2 로드 완료. 세탁기 전원버튼(삐삐) → 스캔&연결 → 전체 결제 플로우');
+</script>
+</body>
+</html>
