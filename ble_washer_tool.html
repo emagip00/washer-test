@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BLE Washer Test Tool</title>
+<style>
+  :root{
+    --bg:#0f1220; --card:#191d2e; --line:#2a2f45; --tx:#e7e9f2;
+    --mut:#9aa0bd; --acc:#7c5cff; --ok:#22c55e; --warn:#f59e0b; --err:#ef4444;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    background:var(--bg);color:var(--tx);padding:16px;max-width:640px;margin:0 auto}
+  h1{font-size:18px;margin:0 0 4px}
+  .sub{color:var(--mut);font-size:12px;margin-bottom:16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:14px;margin-bottom:12px}
+  .card h2{font-size:13px;margin:0 0 10px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
+  label{display:block;font-size:12px;color:var(--mut);margin:8px 0 4px}
+  input{width:100%;background:#11142270;border:1px solid var(--line);color:var(--tx);
+    border-radius:8px;padding:9px 10px;font-size:14px;font-family:inherit}
+  .row{display:flex;gap:8px}
+  .row>div{flex:1}
+  button{width:100%;background:var(--acc);color:#fff;border:0;border-radius:9px;
+    padding:12px;font-size:14px;font-weight:600;cursor:pointer;margin-top:10px}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.sec{background:#262b40}
+  .status{display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--err)}
+  .dot.on{background:var(--ok)}
+  .dot.wait{background:var(--warn)}
+  #log{background:#0a0c17;border:1px solid var(--line);border-radius:8px;padding:10px;
+    height:230px;overflow-y:auto;font-family:ui-monospace,Menlo,Consolas,monospace;
+    font-size:11.5px;line-height:1.55;white-space:pre-wrap;word-break:break-all}
+  .l-tx{color:#60a5fa}.l-rx{color:#34d399}.l-ok{color:#22c55e}.l-err{color:#f87171}.l-i{color:var(--mut)}
+  .hint{font-size:11px;color:var(--mut);margin-top:6px}
+</style>
+</head>
+<body>
+  <h1>🧺 BLE Washer Test Tool</h1>
+  <div class="sub">BlueMeterLib 프로토콜 · 인가된 테스트 기기 전용</div>
+
+  <div class="status">
+    <span class="dot" id="dot"></span>
+    <span id="stateTx">연결 안 됨</span>
+  </div>
+
+  <div class="card">
+    <h2>1 · 연결</h2>
+    <label>기기 이름 필터 (접두어)</label>
+    <input id="namePrefix" value="CW">
+    <div class="hint">세탁기 이름은 CW+숫자8+16진수2 (예: CW1234567800). 비워두면 전체 스캔.</div>
+    <button id="btnConnect">스캔 &amp; 연결</button>
+    <button id="btnDisconnect" class="sec" disabled>연결 해제</button>
+  </div>
+
+  <div class="card">
+    <h2>2 · 명령 전송</h2>
+    <button id="btnHandshake" disabled>핸드셰이크 전송 (CMD 14)</button>
+
+    <label style="margin-top:14px">작동 금액 (원)</label>
+    <input id="amount" type="number" value="2000">
+    <div class="row">
+      <div>
+        <label>옵션 (buf[10])</label>
+        <input id="opt" type="number" value="0">
+      </div>
+      <div>
+        <label>REF_TIME (epoch ms · 미정이면 0)</label>
+        <input id="reftime" type="number" value="0">
+      </div>
+    </div>
+    <button id="btnOperate" disabled>작동 명령 전송 (CMD 8)</button>
+    <div class="hint">CMD 8 = 기계에 "금액 투입" 주입. REF_TIME은 BlueMeter.java 확인 후 채우세요.</div>
+
+    <label style="margin-top:14px">커스텀 패킷 (hex, 공백 무시)</label>
+    <input id="raw" placeholder="예: 24 01 E0 06 D2 23">
+    <button id="btnRaw" class="sec" disabled>커스텀 전송</button>
+  </div>
+
+  <div class="card">
+    <h2>3 · 로그</h2>
+    <div id="log"></div>
+    <button id="btnClear" class="sec">로그 지우기</button>
+  </div>
+
+<script>
+// ===== BlueMeterLib 프로토콜 상수 =====
+const SVC_UUID  = "0000ffb0-0000-1000-8000-00805f9b34fb"; // 서비스
+const CHAR_UUID = "0000ffb2-0000-1000-8000-00805f9b34fb"; // write/notify
+// (0x2902 CCCD는 Web Bluetooth가 startNotifications에서 자동 처리)
+
+let device=null, gatt=null, ch=null, SEQ=0;
+
+const $=id=>document.getElementById(id);
+const dot=$('dot'), stateTx=$('stateTx'), logEl=$('log');
+
+function log(msg,cls='l-i'){
+  const t=new Date().toLocaleTimeString('ko-KR',{hour12:false});
+  logEl.innerHTML+=`<span class="${cls}">[${t}] ${msg}</span>\n`;
+  logEl.scrollTop=logEl.scrollHeight;
+}
+function hex(bytes){return [...bytes].map(b=>b.toString(16).padStart(2,'0').toUpperCase()).join(' ');}
+function setState(txt,mode){ stateTx.textContent=txt; dot.className='dot'+(mode?(' '+mode):''); }
+function setBusy(connected){
+  $('btnConnect').disabled=connected;
+  $('btnDisconnect').disabled=!connected;
+  ['btnHandshake','btnOperate','btnRaw'].forEach(id=>$(id).disabled=!connected);
+}
+
+// ===== 패킷 빌더: BlueMeterLib.P(cmd, len) 그대로 =====
+function buildPacket(cmd, len, fillPayload){
+  SEQ=(SEQ+1)&0xFF;
+  const b=new Uint8Array(len);
+  b[0]=0x24;                                   // '$'
+  b[1]=SEQ;
+  b[2]=((cmd&0x0F)<<4) | ((len>>8)&0x0F);
+  b[3]=len&0xFF;
+  if(fillPayload) fillPayload(b);              // 페이로드 채우기(체크섬 전)
+  b[len-1]=0x23;                               // '#'
+  // 체크섬: 35 + sum(b[0..len-3]) → 256 보수
+  let s=35;
+  for(let i=0;i<len-2;i++) s+=b[i];
+  s&=0xFF; if(s!==0) s=256-s;
+  b[len-2]=s;
+  return b;
+}
+
+// CMD 14 · 핸드셰이크: K() → P(14,6)
+function buildHandshake(){ return buildPacket(14,6,null); }
+
+// CMD 8 · 작동(금액 투입): I(amount, opt) → P(8,13)
+function buildOperate(amount, opt, refTimeMs){
+  return buildPacket(8,13,(b)=>{
+    const t=Math.floor((Date.now()-(refTimeMs||0))/1000);
+    b[4]=(t>>>24)&0x3F;
+    b[5]=(t>>>16)&0xFF;
+    b[6]=(t>>>8)&0xFF;
+    b[7]=t&0xFF;
+    const a=Math.floor(amount/100);
+    b[8]=(a>>8)&0x3F;
+    b[9]=a&0xFF;
+    b[10]=opt&0xFF;
+  });
+}
+
+// ===== 쓰기 (20바이트 청크, 라이브러리와 동일) =====
+async function writeBytes(bytes){
+  const noResp = ch.properties.writeWithoutResponse; // 라이브러리는 NO_RESPONSE(type 1) 사용
+  for(let i=0;i<bytes.length;i+=20){
+    const chunk=bytes.slice(i,i+20);
+    if(noResp) await ch.writeValueWithoutResponse(chunk);
+    else       await ch.writeValueWithResponse(chunk);
+  }
+  log('TX → '+hex(bytes),'l-tx');
+}
+
+// ===== 연결 =====
+$('btnConnect').onclick=async()=>{
+  if(!navigator.bluetooth){ log('이 브라우저는 Web Bluetooth 미지원 (안드로이드 Chrome 필요)','l-err'); return; }
+  const prefix=$('namePrefix').value.trim();
+  try{
+    setState('스캔 중…','wait'); log('스캔 시작…');
+    const opts = prefix
+      ? { filters:[{namePrefix:prefix}], optionalServices:[SVC_UUID] }
+      : { acceptAllDevices:true, optionalServices:[SVC_UUID] };
+    device=await navigator.bluetooth.requestDevice(opts);
+    log('선택: '+(device.name||'(이름없음)')+' / '+device.id);
+    device.addEventListener('gattdisconnected',onDisc);
+
+    setState('연결 중…','wait');
+    gatt=await device.gatt.connect();
+    const svc=await gatt.getPrimaryService(SVC_UUID);
+    ch=await svc.getCharacteristic(CHAR_UUID);
+    log('characteristic ffb2 확보','l-ok');
+
+    await ch.startNotifications();
+    ch.addEventListener('characteristicvaluechanged',e=>{
+      const v=new Uint8Array(e.target.value.buffer);
+      log('RX ← '+hex(v),'l-rx');
+    });
+    log('알림(notify) 활성화','l-ok');
+
+    SEQ=0;
+    setState('연결됨: '+(device.name||device.id),'on');
+    setBusy(true);
+    log('★ 준비 완료. 핸드셰이크부터 보내보세요.','l-ok');
+  }catch(err){
+    setState('연결 안 됨',''); log('오류: '+err.message,'l-err');
+  }
+};
+
+function onDisc(){ setState('연결 끊김',''); setBusy(false); log('기기 연결 해제됨','l-err'); }
+
+$('btnDisconnect').onclick=()=>{ if(gatt&&gatt.connected) gatt.disconnect(); };
+
+// ===== 버튼 =====
+$('btnHandshake').onclick=async()=>{
+  try{ await writeBytes(buildHandshake()); }catch(e){ log('전송 실패: '+e.message,'l-err'); }
+};
+$('btnOperate').onclick=async()=>{
+  const amt=parseInt($('amount').value)||0;
+  const opt=parseInt($('opt').value)||0;
+  const ref=parseInt($('reftime').value)||0;
+  try{ await writeBytes(buildOperate(amt,opt,ref)); }
+  catch(e){ log('전송 실패: '+e.message,'l-err'); }
+};
+$('btnRaw').onclick=async()=>{
+  const clean=$('raw').value.replace(/[^0-9a-fA-F]/g,'');
+  if(clean.length%2){ log('hex 자릿수 오류','l-err'); return; }
+  const b=new Uint8Array(clean.match(/../g).map(h=>parseInt(h,16)));
+  try{ await writeBytes(b); }catch(e){ log('전송 실패: '+e.message,'l-err'); }
+};
+$('btnClear').onclick=()=>{ logEl.innerHTML=''; };
+
+log('툴 로드 완료. [스캔 & 연결]을 누르세요.');
+</script>
+</body>
+</html>
