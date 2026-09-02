@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BLE Washer Test Tool v3.12</title>
+<title>BLE Washer Test Tool v3</title>
 <style>
   :root{--bg:#0f1220;--card:#191d2e;--line:#2a2f45;--tx:#e7e9f2;--mut:#9aa0bd;
     --acc:#7c5cff;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--gold:#eab308;}
@@ -37,7 +37,7 @@
 </style>
 </head>
 <body>
-  <h1>🧺 BLE Washer Test Tool <span style="color:var(--acc)">v3.2</span></h1>
+  <h1>🧺 BLE Washer Test Tool <span style="color:var(--acc)">v4</span></h1>
   <div class="sub">BlueMeterLib 카드결제 상태머신 · 조각 재조립 · 인가된 테스트 기기 전용</div>
 
   <div class="status"><span class="dot" id="dot"></span><span id="stateTx">연결 안 됨</span></div>
@@ -55,7 +55,7 @@
   <div class="card">
     <h2>2 · 작동</h2>
     <div class="row">
-      <div><label>결제 금액 (원)</label><input id="amount" type="number" value="1300"></div>
+      <div><label>결제 금액 (원)</label><input id="amount" type="number" value="2000"></div>
       <div><label>카드 잔액 (remaining)</label><input id="remain" type="number" value="10000"></div>
     </div>
     <button id="btnFull" class="gold" disabled>▶ 원탭 작동 (삽입→확인→결제→제거)</button>
@@ -69,12 +69,21 @@
   </div>
 
   <div class="card">
-    <h2>3 · 수동 / 디버그</h2>
-    <label>단일 카드상태 A(state) 전송</label>
+    <h2>2.5 · 코인 작동 (CMD8) — 새 가설 ⭐</h2>
     <div class="row">
-      <div><input id="astate" type="number" value="160"></div>
-      <div><button id="btnA" class="sec sm" style="margin-top:0" disabled>A 전송</button></div>
+      <div><label>옵션 i8 (모르면 0, 강중약이면 0~3 실험)</label><input id="coinOpt" type="number" value="0"></div>
     </div>
+    <button id="btnCoin" class="gold" disabled>▶ 코인명령 작동 (CMD8 + REF_TIME)</button>
+    <div class="hint">금액은 위 '결제 금액' 칸 사용. 앱이 J()(카드결제)를 안 부르므로, 코인명령이 진짜 작동 경로일 가능성. RES0 응답 오면 성공.</div>
+  </div>
+
+  <div class="card">
+    <h2>3 · 수동 / 디버그</h2>
+    <div class="row">
+      <div><label>단일 카드상태 A(state)</label><input id="astate" type="number" value="160"></div>
+      <div><label>타임아웃 재시도 횟수</label><input id="maxRetry" type="number" value="2"></div>
+    </div>
+    <button id="btnA" class="sec sm" disabled>A(state) 전송</button>
     <label style="margin-top:10px">커스텀 패킷 (hex)</label>
     <input id="raw" placeholder="예: 24 01 E0 06 D2 23">
     <button id="btnRaw" class="sec sm" disabled>커스텀 전송</button>
@@ -89,6 +98,7 @@
 <script>
 const SVC_UUID="0000ffb0-0000-1000-8000-00805f9b34fb";
 const CHAR_UUID="0000ffb2-0000-1000-8000-00805f9b34fb";
+const REF_TIME=1609426800000;   // BlueMeter.REF_TIME (2021-01-01 KST), 코인명령(CMD8) 타임스탬프 기준
 
 let device=null,gatt=null,ch=null,SEQ=0;
 const $=id=>document.getElementById(id);
@@ -100,7 +110,7 @@ function log(m,c='l-i'){const t=new Date().toLocaleTimeString('ko-KR',{hour12:fa
 function hex(b){return[...b].map(x=>x.toString(16).padStart(2,'0').toUpperCase()).join(' ');}
 function setState(t,m){stateTx.textContent=t;dot.className='dot'+(m?' '+m:'');}
 function setBusy(on){$('btnConnect').disabled=on;
-  ['btnDisconnect','btnHandshake','btnRaw',...cardBtns].forEach(id=>$(id).disabled=!on);}
+  ['btnDisconnect','btnHandshake','btnRaw','btnCoin',...cardBtns].forEach(id=>$(id).disabled=!on);}
 function lockCards(lock){ cardBtns.forEach(id=>$(id).disabled=lock); }
 
 // ===== 카드 상태머신 =====
@@ -141,25 +151,54 @@ async function sendCard(state){
 }
 function armTimeout(){clearTimeout(stepTimer);
   stepTimer=setTimeout(()=>{if(!cardActive)return;
+    const maxRetry=Math.max(0,parseInt($('maxRetry').value)||0);
     log('⏱ 타임아웃. 마지막 상태 A('+cardState+'), CardCommand '+cardCommand,'l-err');
-    if(retryCount<10){                          // 라이브러리 B()처럼 A(160)부터 재시도
+    if(cardCommand===4){
+      // 결제 단계는 이중결제 위험 → 자동 재시도 안 함, 명확히 멈춤
+      log('✗ 결제 단계 무응답 — 이중결제 방지를 위해 자동 재시도하지 않습니다.','l-err');
+      log('   세탁기 전원버튼으로 리셋(삐삐) 후, [결제(4)] 버튼으로 수동 재시도하세요.','l-err');
+      endFlow(); return;
+    }
+    if(retryCount<maxRetry){
       retryCount++;
-      log('↻ 재시도 '+retryCount+'/10 (A160부터)','l-step');
+      log('↻ 재시도 '+retryCount+'/'+maxRetry+' (A160부터)','l-step');
       cardMsg=[0,0,0,0]; sendCard(160);
     }else{
-      log('✗ 재시도 10회 초과 — 중단. 세탁기 전원버튼 다시 눌러 삐삐 후 재시도하세요.','l-err');
+      log('✗ 재시도 '+maxRetry+'회 초과 — 중단. 세탁기 전원버튼 눌러 삐삐 후 재시도하세요.','l-err');
       endFlow();
     }
   },3500);}
 function endFlow(){cardActive=false;flowQueue=[];lockCards(false);retryCount=0;}
 
+// ===== 코인명령 CMD8 (BlueMeterLib.I) — REF_TIME 사용 =====
+function buildCoin(amount,opt){
+  const len=13; const b=new Uint8Array(len);
+  const t=Math.floor((Date.now()-REF_TIME)/1000);   // 초 단위 경과시간
+  b[4]=(t>>>24)&0x3F; b[5]=(t>>>16)&0xFF; b[6]=(t>>>8)&0xFF; b[7]=t&0xFF;
+  const a=Math.floor(amount/100);
+  b[8]=(a>>8)&0x3F; b[9]=a&0xFF; b[10]=opt&0xFF;
+  SEQ=(SEQ+1)&0xFF;
+  b[0]=0x24;b[1]=SEQ;b[2]=((8&15)<<4)|((len>>8)&15);b[3]=len&0xFF;b[len-1]=0x23;
+  let os=35;for(let k=0;k<len-2;k++)os+=b[k];os&=0xFF;if(os)os=256-os;b[len-2]=os;
+  return b;
+}
+async function sendCoin(){
+  cardActive=false; clearTimeout(stepTimer);
+  const amt=parseInt($('amount').value)||0;
+  const opt=parseInt($('coinOpt').value)||0;
+  const p=buildCoin(amt,opt);
+  log('▶ 코인명령(CMD8) 전송  금액='+amt+' 옵션='+opt,'l-step');
+  try{ await writeBytes(p); }catch(e){ log('실패:'+e.message,'l-err'); }
+}
+
 // ===== RX 처리 (v2 방식: 조각 대기 없이 즉시 처리) =====
 function onNotification(bytes){
   log('RX ← '+hex(bytes),'l-rx');
-  if(!cardActive) return;
   const i=bytes.indexOf(0x24);
   if(i<0 || bytes[i+2]===undefined) return;   // 0x24 없는 꼬리조각 등은 무시
-  onCardResponse(bytes,i);
+  const cmd=(bytes[i+2]>>4)&15, res=bytes[i+2]&15;
+  if(cardActive){ onCardResponse(bytes,i); return; }
+  if(cmd===8){ log('  ← 코인 응답 CMD8 RES'+res+(res===0?' ✓ 성공 → 작동!':' ✗ 거부'), res===0?'l-big':'l-err'); }
 }
 
 function onCardResponse(frame,i){
@@ -260,6 +299,7 @@ function hs(){SEQ=(SEQ+1)&0xFF;const b=new Uint8Array(6);
   b[0]=0x24;b[1]=SEQ;b[2]=0xE0;b[3]=6;b[5]=0x23;
   let s=35;for(let k=0;k<4;k++)s+=b[k];s&=0xFF;if(s)s=256-s;b[4]=s;return b;}
 $('btnHandshake').onclick=async()=>{try{await writeBytes(hs());}catch(e){log('실패:'+e.message,'l-err');}};
+$('btnCoin').onclick=()=>sendCoin();
 
 $('btnFull').onclick=()=>{flowQueue=[3,4,5];startCard(1);};  // 삽입→확인→결제→제거(카드 빼서 깨끗이 종료)
 $('btnInsert').onclick=()=>{flowQueue=[];startCard(1);};
